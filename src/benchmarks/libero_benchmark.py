@@ -10,6 +10,7 @@ Usage:
 
 import os
 import sys
+import re
 from pathlib import Path
 
 # Add OpenVLA experiments path
@@ -19,6 +20,10 @@ sys.path.insert(0, str(OPENVLA_PATH))
 from experiments.robot.libero.run_libero_eval import GenerateConfig
 # Import the unwrapped eval_libero function directly from the module
 import experiments.robot.libero.run_libero_eval as libero_eval_module
+
+# Import standardized evaluator
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from evaluation.evaluator import BenchmarkEvaluator
 
 
 def run_libero_benchmark(
@@ -30,9 +35,10 @@ def run_libero_benchmark(
     wandb_project: str = "vla-bench",
     wandb_entity: str = "your-entity",
     seed: int = 7,
+    results_dir: str = "./results",
 ):
     """
-    Run OpenVLA evaluation on LIBERO benchmark.
+    Run OpenVLA evaluation on LIBERO benchmark with standardized result collection.
 
     Args:
         model_checkpoint: HuggingFace checkpoint or local path
@@ -43,7 +49,21 @@ def run_libero_benchmark(
         wandb_project: W&B project name
         wandb_entity: W&B entity name
         seed: Random seed for reproducibility
+        results_dir: Directory to save standardized results JSON
     """
+
+    # Initialize standardized evaluator for timing and result collection
+    evaluator = BenchmarkEvaluator(
+        model=model_checkpoint,
+        benchmark="libero",
+        subtask=task_suite,
+        save_dir=results_dir,
+        center_crop=center_crop,
+        seed=seed
+    )
+
+    # Start timing
+    evaluator.start()
 
     # Create config
     config = GenerateConfig(
@@ -69,6 +89,49 @@ def run_libero_benchmark(
     eval_libero_unwrapped = libero_eval_module.eval_libero.__wrapped__
     eval_libero_unwrapped(config)
 
+    # Parse the log file to extract results
+    log_dir = Path(config.local_log_dir)
+    # Find the most recent log file for this task suite
+    log_files = sorted(log_dir.glob(f"EVAL-{task_suite}-openvla-*.txt"))
+
+    if log_files:
+        latest_log = log_files[-1]
+        success_rate, num_episodes = _parse_libero_log(latest_log)
+        print(f"\n[Results] Success Rate: {success_rate:.1%}, Episodes: {num_episodes}")
+    else:
+        print(f"\n[Warning] No log file found, using default values")
+        success_rate = 0.0
+        num_episodes = num_trials
+
+    # Save standardized results
+    evaluator.end(
+        success_rate=success_rate,
+        num_episodes=num_episodes
+    )
+
+
+def _parse_libero_log(log_file: Path):
+    """Parse LIBERO log file to extract final success rate and episode count."""
+    with open(log_file, 'r') as f:
+        content = f.read()
+
+    # Find last occurrence of: "# successes: X (Y%)"
+    success_pattern = r"# successes: (\d+) \(([0-9.]+)%\)"
+    matches = re.findall(success_pattern, content)
+
+    if matches:
+        last_match = matches[-1]
+        success_rate = float(last_match[1]) / 100.0
+
+        # Find total episodes
+        episode_pattern = r"# episodes completed so far: (\d+)"
+        episode_matches = re.findall(episode_pattern, content)
+        num_episodes = int(episode_matches[-1]) if episode_matches else 0
+
+        return success_rate, num_episodes
+
+    return 0.0, 0
+
 
 if __name__ == "__main__":
     import argparse
@@ -93,6 +156,8 @@ if __name__ == "__main__":
                         help="W&B entity name")
     parser.add_argument("--seed", type=int, default=7,
                         help="Random seed")
+    parser.add_argument("--results_dir", type=str, default="./results",
+                        help="Directory to save standardized results JSON")
 
     args = parser.parse_args()
 
@@ -105,4 +170,5 @@ if __name__ == "__main__":
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         seed=args.seed,
+        results_dir=args.results_dir,
     )
